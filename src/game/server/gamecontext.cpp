@@ -1373,6 +1373,22 @@ void CGameContext::OnMessage(int MsgID, CUnpacker *pUnpacker, int ClientID)
 			SendChatTarget(ClientID, aBuf);
 			str_format(aBuf, sizeof(aBuf), "You were released by '%s'.", Server()->ClientName(ClientID));
 			SendChatTarget(lastVictim, aBuf);
+
+			str_format(aBuf, sizeof(aBuf), "release killer='%d:%s' victim= '%d:%s'" , ClientID, Server()->ClientName(ClientID), lastVictim, Server()->ClientName(lastVictim));
+			Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "game", aBuf);
+
+			if(nextToRelease != -1)
+			{
+				CPlayer::CZCatchVictim *v = pPlayer->m_ZCatchVictims;
+				str_format(aBuf, sizeof(aBuf), "'%s' released '%s'", Server()->ClientName(ClientID), Server()->ClientName(lastVictim));
+				while(v != NULL)
+				{
+					SendChatTarget(v->ClientID, aBuf);
+					v = v->prev;
+				}
+
+			}
+
 			return;
 		}
 		else if(g_Config.m_SvSuicideTime == 0)
