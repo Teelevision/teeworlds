@@ -821,6 +821,22 @@ void CServer::DoSnapshot()
 	GameServer()->OnPostSnap();
 }
 
+int CServer::NewClientNoAuthCallback(int ClientID, void *pUser)
+{
+	CServer *pThis = (CServer *)pUser;
+	pThis->m_aClients[ClientID].m_State = CClient::STATE_CONNECTING;
+	pThis->m_aClients[ClientID].m_aName[0] = 0;
+	pThis->m_aClients[ClientID].m_aClan[0] = 0;
+	pThis->m_aClients[ClientID].m_Country = -1;
+	pThis->m_aClients[ClientID].m_Authed = AUTHED_NO;
+	pThis->m_aClients[ClientID].m_AuthTries = 0;
+	pThis->m_aClients[ClientID].m_pRconCmdToSend = 0;
+	pThis->m_aClients[ClientID].Reset();
+
+	pThis->SendMap(ClientID);
+
+	return 0;
+}
 
 int CServer::NewClientCallback(int ClientID, void *pUser)
 {
@@ -955,7 +971,7 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 		// system message
 		if(Msg == NETMSG_INFO)
 		{
-			if(m_aClients[ClientID].m_State == CClient::STATE_AUTH)
+			if((pPacket->m_Flags&NET_CHUNKFLAG_VITAL) != 0 && m_aClients[ClientID].m_State == CClient::STATE_AUTH)
 			{
 				const char *pVersion = Unpacker.GetString(CUnpacker::SANITIZE_CC);
 				if(str_comp(pVersion, GameServer()->NetVersion()) != 0)
@@ -970,28 +986,11 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 				const char *pPassword = Unpacker.GetString(CUnpacker::SANITIZE_CC);
 
 
-				if (!g_Config.m_SvPwAntiflood)
-				{
 				if(g_Config.m_Password[0] != 0 && str_comp(g_Config.m_Password, pPassword) != 0)
 				{
 					// wrong password
 					m_NetServer.Drop(ClientID, "Wrong password");
 					return;
-					}
-				}
-				else
-				{
-					// anti spoof
-					char aToken[5];
-					m_NetServer.TokenToBaseString(m_NetServer.GetToken(*m_NetServer.ClientAddr(ClientID)), aToken);
-
-					// validate token
-					if(str_comp(aToken, pPassword) != 0)
-					{
-						// wrong password
-						m_NetServer.Drop(ClientID, "Wrong password");
-						return;
-					}
 				}
 
 				m_aClients[ClientID].m_State = CClient::STATE_CONNECTING;
@@ -1000,7 +999,7 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 		}
 		else if(Msg == NETMSG_REQUEST_MAP_DATA)
 		{
-			if(m_aClients[ClientID].m_State < CClient::STATE_CONNECTING)
+			if((pPacket->m_Flags&NET_CHUNKFLAG_VITAL) == 0 || m_aClients[ClientID].m_State < CClient::STATE_CONNECTING)
 				return;
 
 			int Chunk = Unpacker.GetInt();
@@ -1037,13 +1036,13 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 		}
 		else if(Msg == NETMSG_READY)
 		{
-			if(m_aClients[ClientID].m_State == CClient::STATE_CONNECTING)
+			if((pPacket->m_Flags&NET_CHUNKFLAG_VITAL) != 0 && m_aClients[ClientID].m_State == CClient::STATE_CONNECTING)
 			{
 				char aAddrStr[NETADDR_MAXSTRSIZE];
 				net_addr_str(m_NetServer.ClientAddr(ClientID), aAddrStr, sizeof(aAddrStr), true);
 
 				char aBuf[256];
-				str_format(aBuf, sizeof(aBuf), "player is ready. ClientID=%x addr=%s", ClientID, aAddrStr);
+				str_format(aBuf, sizeof(aBuf), "player is ready. ClientID=%x addr=%s secure=%s", ClientID, aAddrStr, m_NetServer.HasSecurityToken(ClientID)?"yes":"no");
 				Console()->Print(IConsole::OUTPUT_LEVEL_ADDINFO, "server", aBuf);
 				m_aClients[ClientID].m_State = CClient::STATE_READY;
 				GameServer()->OnClientConnected(ClientID);
@@ -1052,7 +1051,7 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 		}
 		else if(Msg == NETMSG_ENTERGAME)
 		{
-			if(m_aClients[ClientID].m_State == CClient::STATE_READY && GameServer()->IsClientReady(ClientID))
+			if((pPacket->m_Flags&NET_CHUNKFLAG_VITAL) != 0 && m_aClients[ClientID].m_State == CClient::STATE_READY && GameServer()->IsClientReady(ClientID))
 			{
 				char aAddrStr[NETADDR_MAXSTRSIZE];
 				net_addr_str(m_NetServer.ClientAddr(ClientID), aAddrStr, sizeof(aAddrStr), true);
@@ -1120,7 +1119,7 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 		{
 			const char *pCmd = Unpacker.GetString();
 
-			if(Unpacker.Error() == 0 && m_aClients[ClientID].m_Authed)
+			if((pPacket->m_Flags&NET_CHUNKFLAG_VITAL) != 0 && Unpacker.Error() == 0 && m_aClients[ClientID].m_Authed)
 			{
 				
 				// try to find first space
@@ -1177,7 +1176,8 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 				password.assign(delimiter + 1);
 			}
 			
-			if(Unpacker.Error() == 0)
+
+			if((pPacket->m_Flags&NET_CHUNKFLAG_VITAL) != 0 && Unpacker.Error() == 0)
 			{
 				if(g_Config.m_SvRconPassword[0] == 0 && g_Config.m_SvRconModPassword[0] == 0 && logins.empty())
 				{
@@ -1367,7 +1367,7 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 	else
 	{
 		// game message
-		if(m_aClients[ClientID].m_State >= CClient::STATE_READY)
+		if((pPacket->m_Flags&NET_CHUNKFLAG_VITAL) != 0 && m_aClients[ClientID].m_State >= CClient::STATE_READY)
 			GameServer()->OnMessage(Msg, &Unpacker, ClientID);
 	}
 }
@@ -1401,19 +1401,7 @@ void CServer::SendServerInfo(const NETADDR *pAddr, int Token)
 
 	char aName[256];
 
-	if (g_Config.m_SvPwAntiflood)
-	{
-	// send the alternative server name when a admin is online
-	char aToken[5];
-	m_NetServer.TokenToBaseString(m_NetServer.GetToken(*pAddr), aToken);
-
-	str_format(aName, sizeof(aName), "Password: %s - %s", aToken, (m_numLoggedInAdmins && str_length(g_Config.m_SvNameAdmin)) ? g_Config.m_SvNameAdmin : g_Config.m_SvName);
-
-	p.AddString(aName, 64);
-	}
-	else{
 	p.AddString((m_numLoggedInAdmins && str_length(g_Config.m_SvNameAdmin)) ? g_Config.m_SvNameAdmin : g_Config.m_SvName, 64);
-	}
 
 	p.AddString(GetMapName(), 32);
 
@@ -1589,7 +1577,7 @@ int CServer::Run()
 		return -1;
 	}
 
-	m_NetServer.SetCallbacks(NewClientCallback, DelClientCallback, this);
+	m_NetServer.SetCallbacks(NewClientCallback, NewClientNoAuthCallback, DelClientCallback, this);
 
 	m_Econ.Init(Console(), &m_ServerBan);
 
@@ -2240,8 +2228,8 @@ void CServer::ConStatus(IConsole::IResult *pResult, void *pUser)
 										pThis->m_aClients[i].m_Authed == CServer::AUTHED_SUBADMIN ? bBuf :
 										pThis->m_aClients[i].m_Authed == CServer::AUTHED_MOD ? "(Mod)" : "";
 				const char *pAimBotStr = pThis->GameServer()->IsClientAimBot(i) ? "[aimbot]" : "";
-				str_format(aBuf, sizeof(aBuf), "id=%d name='%s' score=%d addr=%s %s %s", i, pThis->m_aClients[i].m_aName, pThis->m_aClients[i].m_Score, aAddrStr,
-					  pAuthStr, pAimBotStr);
+				str_format(aBuf, sizeof(aBuf), "id=%d name='%s' score=%d addr=%s secure=%s %s %s", i, pThis->m_aClients[i].m_aName, pThis->m_aClients[i].m_Score, aAddrStr,
+					  pThis->m_NetServer.HasSecurityToken(i) ? "yes":"no", pAuthStr, pAimBotStr);
 			}
 			else
 				str_format(aBuf, sizeof(aBuf), "id=%d addr=%s (connecting...)", i, aAddrStr);
