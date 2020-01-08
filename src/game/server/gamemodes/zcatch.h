@@ -10,15 +10,24 @@
 
 class CGameController_zCatch: public IGameController
 {
-	int m_OldMode;
+
 	
 	void RewardWinner(int winnerId);
 	
 	/* ranking system */
-	static void ChatCommandTopFetchDataAndPrint(CGameContext* GameServer, int clientId, const char *column);
-	static void ChatCommandRankFetchDataAndPrint(CGameContext* GameServer, int clientId, char *name);
-	static void SaveScore(CGameContext* GameServer, char *name, int score, int numWins, int numKills, int numKillsWallshot, int numDeaths, int numShots, int highestSpree, int timePlayed);
-	static void FormatRankingColumn(const char* column, char buf[32], int value);
+	static void ChatCommandTopFetchDataAndPrint(CGameContext* GameServer, int clientId, const char *column, const char* title);
+	static void ChatCommandRankFetchDataAndPrint(CGameContext* GameServer, int clientId, char *name, bool sendToEveryone);
+	static void SaveScore(CGameContext* GameServer, char *name, int score, int numWins, int numKills, int numKillsWallshot, int numDeaths, int numShots, int highestSpree, int timePlayed, int GameMode, int Free = 0);
+	static void ChatCommandStatsFetchDataAndPrint(CGameContext* GameServer, int clientId, const char* cmd);
+
+	/* Helper functions */
+	static unsigned int SendLines(CGameContext* GameServer, std::string& lines, int ClientID = -1);
+
+	/**
+	 * Score point transformation
+	 */
+	static inline int enemiesKilledToPoints(int enemies);
+	static inline double pointsToEnemiesKilled(int points);
 
 public:
 	CGameController_zCatch(class CGameContext *pGameServer);
@@ -34,12 +43,23 @@ public:
 	virtual bool CanChangeTeam(CPlayer *pPlayer, int JoinTeam);
 	virtual void EndRound();
 	
+
+
 	/* ranking system */
 	virtual void SaveRanking(CPlayer *player);
 	virtual void OnInitRanking(sqlite3 *rankingDb);
 	virtual void OnChatCommandTop(CPlayer *pPlayer, const char *category = "");
 	virtual void OnChatCommandOwnRank(CPlayer *pPlayer);
-	virtual void OnChatCommandRank(CPlayer *pPlayer, const char *name);
+	virtual void OnChatCommandRank(CPlayer *pPlayer, const char *name, bool sendToEveryone = false);
+
+	virtual void OnChatCommandStats(CPlayer *pPlayer, const char *cmdName);
+
+
+
+	static void MergeRankingIntoTarget(CGameContext* GameServer, char* Source, char *Target);
+	static void DeleteRanking(CGameContext* GameServer, char* Name, int GameMode = 0, int Free = 0);
+	static std::string GetGameModeTableName(int GameMode = 0);
+
 };
 
 #endif

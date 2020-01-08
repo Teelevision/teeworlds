@@ -3,9 +3,13 @@
 #ifndef GAME_SERVER_GAMECONTEXT_H
 #define GAME_SERVER_GAMECONTEXT_H
 
+#include "base/hash.h"
+
 #include <engine/server.h>
 #include <engine/console.h>
+#include <engine/storage.h>
 #include <engine/shared/memheap.h>
+
 
 #include <game/layers.h>
 #include <game/voting.h>
@@ -14,16 +18,18 @@
 #include "gamecontroller.h"
 #include "gameworld.h"
 #include "player.h"
+#include "teehistorian.h"
 
 /* ranking system */
 #include <engine/external/sqlite/sqlite3.h>
-#include <thread>
-#include <vector>
+#include <queue>
 #include <mutex>
 #include <chrono>
+#include <future>
+
 
 #define MAX_MUTES 35
-#define ZCATCH_VERSION "0.4.8"
+#define ZCATCH_VERSION "0.6.1"
 
 /*
 	Tick
@@ -47,10 +53,18 @@
 			All players (CPlayer::snap)
 
 */
+struct HardMode
+	{
+		const char* name;
+		bool laser;
+		bool grenade;
+	};
+
 class CGameContext : public IGameServer
 {
 	IServer *m_pServer;
 	class IConsole *m_pConsole;
+	IStorage *m_pStorage;
 	CLayers m_Layers;
 	CCollision m_Collision;
 	CNetObjHandler m_NetObjHandler;
@@ -92,23 +106,19 @@ class CGameContext : public IGameServer
 	
 	/* ranking system: sqlite connection */
 	sqlite3 *m_RankingDb;
-	std::vector<std::thread*> m_RankingThreads;
 	std::timed_mutex m_RankingDbMutex;
 	
 	// zCatch/TeeVi: hard mode
-	struct HardMode
-	{
-		const char* name;
-		bool laser;
-		bool grenade;
-	};
 	std::vector<HardMode> m_HardModes;
 	
 public:
 	IServer *Server() const { return m_pServer; }
 	class IConsole *Console() { return m_pConsole; }
 	CCollision *Collision() { return &m_Collision; }
+	IStorage *Storage() { return m_pStorage; }
 	CTuningParams *Tuning() { return &m_Tuning; }
+	class CServerBan *GetBanServer() { return Server()->GetBanServer();}
+
 
 	CGameContext();
 	~CGameContext();
@@ -120,6 +130,7 @@ public:
 
 	IGameController *m_pController;
 	CGameWorld m_World;
+	CUuid m_GameUuid;
 
 	// helper functions
 	class CCharacter *GetPlayerChar(int ClientID);
@@ -147,6 +158,7 @@ public:
 		VOTE_ENFORCE_UNKNOWN=0,
 		VOTE_ENFORCE_NO,
 		VOTE_ENFORCE_YES,
+		VOTE_ENFORCE_NO_ADMIN,
 	};
 	CHeap *m_pVoteOptionHeap;
 	CVoteOptionServer *m_pVoteOptionFirst;
@@ -158,24 +170,24 @@ public:
 	void CreateHammerHit(vec2 Pos);
 	void CreatePlayerSpawn(vec2 Pos);
 	void CreateDeath(vec2 Pos, int Who);
-	void CreateSound(vec2 Pos, int Sound, int Mask=-1);
-	void CreateSoundGlobal(int Sound, int Target=-1);
+	void CreateSound(vec2 Pos, int Sound, int Mask = -1);
+	void CreateSoundGlobal(int Sound, int Target = -1);
 
 
 
 	enum
 	{
-		CHAT_ALL=-2,
-		CHAT_SPEC=-1,
-		CHAT_RED=0,
-		CHAT_BLUE=1
+		CHAT_ALL = -2,
+		CHAT_SPEC = -1,
+		CHAT_RED = 0,
+		CHAT_BLUE = 1
 	};
-	
+
 	struct CMutes
 	{
 		char m_aIP[NETADDR_MAXSTRSIZE];
 		int m_Expires;
-	}; 
+	};
 	CMutes m_aMutes[MAX_MUTES];
 	// helper functions
 	void AddMute(const char* pIP, int Secs);
@@ -193,7 +205,14 @@ public:
 	void SendBroadcast(const char *pText, int ClientID);
 	virtual void InformPlayers(const char *pText) { SendChatTarget(-1, pText); }
 
-	//
+    bool m_TeeHistorianActive;
+    CTeeHistorian m_TeeHistorian;
+    ASYNCIO *m_pTeeHistorianFile;
+
+    static void CommandCallback(int ClientID, int FlagMask, const char *pCmd, IConsole::IResult *pResult, void *pUser);
+    static void TeeHistorianWrite(const void *pData, int DataSize, void *pUser);
+
+    //
 	void CheckPureTuning();
 	void SendTuningParams(int ClientID);
 
@@ -212,6 +231,9 @@ public:
 
 	virtual void OnMessage(int MsgID, CUnpacker *pUnpacker, int ClientID);
 
+    virtual void OnClientEngineJoin(int ClientID);
+    virtual void OnClientEngineDrop(int ClientID, const char *pReason);
+
 	virtual void OnClientConnected(int ClientID);
 	virtual void OnClientEnter(int ClientID);
 	virtual void OnClientDrop(int ClientID, const char *pReason);
@@ -221,6 +243,7 @@ public:
 	virtual bool IsClientReady(int ClientID);
 	virtual bool IsClientPlayer(int ClientID);
 
+	virtual CUuid GameUuid();
 	virtual const char *GameType();
 	virtual const char *Version();
 	virtual const char *NetVersion();
@@ -233,19 +256,70 @@ public:
 	};
 	virtual bool IsClientAimBot(int ClientID);
 	
+
+	/*future stuff*/
+	std::queue<std::future<void> > m_Futures;
+
+	void AddFuture(std::future<void> Future) {m_Futures.push(std::move(Future));};
+	
+	void CleanFutures() {
+		unsigned long size = m_Futures.size();
+
+		for (unsigned long i = 0; i < size; ++i)
+		{
+			std::future<void> f = std::move(m_Futures.front());
+			m_Futures.pop();
+			auto status = f.wait_for(std::chrono::milliseconds(0));
+			if (status == std::future_status::ready)
+			{
+
+			} else {
+				m_Futures.push(std::move(f));
+			}
+		}
+	};
+
+	void WaitForFutures() {
+		unsigned long size = m_Futures.size();
+
+		for (unsigned long i = 0; i < size; ++i)
+		{
+			std::future<void> f = std::move(m_Futures.front());
+			m_Futures.pop();
+			f.wait();
+		}
+
+	};
+
 	/* ranking system */
 	sqlite3* GetRankingDb() { return m_RankingDb; };
 	bool RankingEnabled() { return m_RankingDb != NULL; };
 	bool LockRankingDb(int ms = -1);
 	void UnlockRankingDb();
-	void AddRankingThread(std::thread *thread) { m_RankingThreads.push_back(thread); };
-	
+
+
+	static void ConMergeRecords(IConsole::IResult *pResult, void *pUserData);
+	static void ConMergeRecordsId(IConsole::IResult *pResult, void *pUserData);
+
+	static void ConFlags(IConsole::IResult *pResult, void *pUserData);
+	static void ConFlagsById(IConsole::IResult *pResult, void *pUserData);
+
+	static void ConClientVersions(IConsole::IResult *pResult, void *pUserData);
+	static void ConClientVersionsById(IConsole::IResult *pResult, void *pUserData);
+
+	static void ConWeirdMessages(IConsole::IResult *pResult, void *pUserData);
+	static void ConWeirdMessagesById(IConsole::IResult *pResult, void *pUserData);
+
+	static void ConShowCursorPositionByID(IConsole::IResult *pResult, void *pUserData);
+	static void ConHideCursorPositionByID(IConsole::IResult *pResult, void *pUserData);
+	static void ConResetCursorPositionVisibility(IConsole::IResult *pResult, void *pUserData);
+
 	// zCatch/TeeVi: hard mode
 	std::vector<HardMode> GetHardModes() { return std::vector<HardMode>(m_HardModes.begin(), m_HardModes.end()); };
 };
 
 inline int CmaskAll() { return -1; }
-inline int CmaskOne(int ClientID) { return 1<<ClientID; }
-inline int CmaskAllExceptOne(int ClientID) { return 0x7fffffff^CmaskOne(ClientID); }
-inline bool CmaskIsSet(int Mask, int ClientID) { return (Mask&CmaskOne(ClientID)) != 0; }
+inline int CmaskOne(int ClientID) { return 1 << ClientID; }
+inline int CmaskAllExceptOne(int ClientID) { return 0x7fffffff ^ CmaskOne(ClientID); }
+inline bool CmaskIsSet(int Mask, int ClientID) { return (Mask & CmaskOne(ClientID)) != 0; }
 #endif

@@ -27,6 +27,8 @@ public:
 	CCharacter(CGameWorld *pWorld);
 	~CCharacter();
 
+	CCharacterCore GetCore() { return m_Core; };
+
 	virtual void Reset();
 	virtual void Destroy();
 	virtual void Tick();
@@ -36,6 +38,7 @@ public:
 
 	bool IsGrounded();
 
+	int GetWeapon();
 	void SetWeapon(int W);
 	void HandleWeaponSwitch();
 	void DoWeaponSwitch();

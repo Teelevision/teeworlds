@@ -20,6 +20,7 @@ public:
 		ACCESS_LEVEL_ADMIN=0,
 		ACCESS_LEVEL_SUBADMIN,
 		ACCESS_LEVEL_MOD,
+		ACCESS_LEVEL_NO=-1,
 
 		TEMPCMD_NAME_LENGTH=32,
 		TEMPCMD_HELP_LENGTH=96,
@@ -60,6 +61,7 @@ public:
 		int GetAccessLevel() const { return m_AccessLevel; }
 	};
 
+    typedef void (*FTeeHistorianCommandCallback)(int ClientID, int FlagMask, const char *pCmd, IResult *pResult, void *pUser);
 	typedef void (*FPrintCallback)(const char *pStr, void *pUser);
 	typedef void (*FPossibleCallback)(const char *pCmd, void *pUser);
 	typedef void (*FCommandCallback)(IResult *pResult, void *pUserData);
@@ -78,13 +80,14 @@ public:
 	virtual void StoreCommands(bool Store) = 0;
 
 	virtual bool LineIsValid(const char *pStr) = 0;
-	virtual void ExecuteLine(const char *Sptr) = 0;
-	virtual void ExecuteLineFlag(const char *Sptr, int FlasgMask) = 0;
-	virtual void ExecuteLineStroked(int Stroke, const char *pStr) = 0;
+	virtual void ExecuteLine( const char *Sptr, int ClientID = -1) = 0;
+	virtual void ExecuteLineFlag(const char *Sptr, int FlasgMask, int ClientID = -1) = 0;
+	virtual void ExecuteLineStroked(int Stroke, const char *pStr, int ClientID = -1) = 0;
 	virtual void ExecuteFile(const char *pFilename) = 0;
 
 	virtual int RegisterPrintCallback(int OutputLevel, FPrintCallback pfnPrintCallback, void *pUserData) = 0;
 	virtual void SetPrintOutputLevel(int Index, int OutputLevel) = 0;
+	virtual void SetTeeHistorianCommandCallback(FTeeHistorianCommandCallback pfnCallback, void *pUser) = 0;
 	virtual void Print(int Level, const char *pFrom, const char *pStr) = 0;
 
 	virtual void SetAccessLevel(int AccessLevel) = 0;

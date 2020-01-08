@@ -5,6 +5,9 @@
 #include <vector> // std::vector
 #include <engine/shared/config.h>
 #include "player.h"
+#include "game/server/entities/fakelaser.h"
+
+struct HardMode;
 
 
 MACRO_ALLOC_POOL_ID_IMPL(CPlayer, MAX_CLIENTS)
@@ -62,6 +65,10 @@ CPlayer::CPlayer(CGameContext *pGameServer, int ClientID, int Team)
 	m_CurrentTarget.y = 0;
 	m_LastTarget.x = 0;
 	m_LastTarget.y = 0;
+
+	// Whether an admin can watch this player's 
+	// current cursor position
+	m_IsMousePositionVisible = false;
 }
 
 CPlayer::~CPlayer()
@@ -232,6 +239,30 @@ void CPlayer::Snap(int SnappingClient)
 	pPlayerInfo->m_Score = m_Score;
 	pPlayerInfo->m_Team = m_Team;
 
+    // Snapping Client receives the Snapshot
+    // if receiving player is an admin and the currently 
+    // looked at player is being tracked.
+    if (m_IsMousePositionVisible 
+		&& m_pCharacter 
+		&& Server()->IsAuthed(SnappingClient) 
+		&& GameServer()->m_apPlayers[SnappingClient]->m_Team == TEAM_SPECTATORS)
+    {
+            // If it's an admin, we want to send
+            // this players cursor position to that admin.
+
+            auto pWorld = &(GameServer()->m_World);
+
+            vec2 pos = m_pCharacter->m_Pos;
+            vec2 cursor = pos + m_LastTarget;
+            int laserOwner = m_ClientID;
+            int visibilityTarget = SnappingClient;
+            /**
+         * Register a fake laser that's drawn from pos to cursor
+         * pass laser owner's id and only show the laser to the "visibility target"
+         */
+            new CFakeLaser(pWorld, pos, cursor, laserOwner, visibilityTarget);
+    }
+
 	if(m_ClientID == SnappingClient)
 		pPlayerInfo->m_Local = 1;
 
@@ -295,10 +326,21 @@ void CPlayer::OnDirectInput(CNetObj_PlayerInput *NewInput)
 			m_pCharacter->ResetInput();
 
 		m_PlayerFlags = NewInput->m_PlayerFlags;
+
+		/**
+		 * Insert all of a player's sent player flags into the set
+		 * and keep track of them.
+		 */
+		m_PlayerUniqueFlags.insert(m_PlayerFlags);
  		return;
 	}
 
 	m_PlayerFlags = NewInput->m_PlayerFlags;
+
+	/**
+	 * Keep track of all player flags in a set.
+	 */
+	m_PlayerUniqueFlags.insert(m_PlayerFlags);
 
 	if(m_pCharacter)
 		m_pCharacter->OnDirectInput(NewInput);
@@ -596,7 +638,7 @@ bool CPlayer::AddHardMode(const char* mode)
 // add a random hard mode
 const char* CPlayer::AddRandomHardMode()
 {
-	auto modes = m_pGameServer->GetHardModes();
+	std::vector<HardMode> modes = m_pGameServer->GetHardModes();
 	std::random_shuffle(modes.begin(), modes.end());
 	
 	for(auto it = modes.begin(); it != modes.end(); ++it)
@@ -642,3 +684,78 @@ void CPlayer::HardModeFailedShot()
 		GameServer()->SendBroadcast(Buf, GetCID());
 	}
 }
+
+    
+const std::vector<int> CPlayer::GetUniqueFlags() const
+{
+	std::vector<int> v;
+	for (auto &flag : m_PlayerUniqueFlags)
+	{
+		v.push_back(flag);
+	}
+
+	std::sort(v.begin(), v.end());
+	return v;
+}
+
+const std::vector<int> CPlayer::GetUniqueClientVersions() const
+{
+	std::vector<int> v;
+	// no version data, return empty vector.
+	if (m_ClientVersions.empty())
+	{
+		return v;
+	}
+
+	// have version data, return sorted vector, basically a list.
+	for (auto &version : m_ClientVersions)
+	{
+		v.push_back(version);
+	}
+
+	std::sort(v.begin(), v.end());
+	return v;
+}
+
+void CPlayer::AddWeirdMessage(int MessageID)
+{	
+	// if key doesn't exist in map
+	if(!m_WeirdClientMessages.count(MessageID))
+	{
+		// first time we see that weird message ID, we
+		// create a new key-value-pair and insert it into the map.
+		m_WeirdClientMessages.emplace(MessageID, 1);
+	}
+	else
+	{
+		// MessageID already exists as key in our map.
+		// we get a reference returned, that we can simply increment.
+		m_WeirdClientMessages.at(MessageID) += 1;
+	}
+}
+
+const std::vector<std::pair<int, int>> CPlayer::GetUniqueWeirdMessageOccurrences() const
+{	
+	// vector containing key & value pairs
+ 	std::vector<std::pair<int, int>> v;
+
+ 	for (auto& key_value_pair : m_WeirdClientMessages)
+ 	{
+ 		// fill vector with data
+ 		v.emplace_back(key_value_pair.first, key_value_pair.second);
+ 	}
+
+ 	// sort vector based on key values
+ 	// anonymous function (lambda/closure)
+    std::sort(
+        v.begin(),
+        v.end(),
+    	[](const std::pair<int, int>& x, const std::pair<int, int>& y) 
+    	{
+    		return x.first < y.first;
+    	}
+    );
+
+    return v;
+}
+

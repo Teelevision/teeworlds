@@ -6,6 +6,11 @@
 // this include should perhaps be removed
 #include "entities/character.h"
 #include "gamecontext.h"
+#include <set>
+#include <vector>
+#include <bitset>
+#include <algorithm>
+#include <map>
 
 // player object
 class CPlayer
@@ -42,6 +47,63 @@ public:
 
 	// states if the client is chatting, accessing a menu etc.
 	int m_PlayerFlags;
+
+	/**
+     * @brief Unique flags that the client sends to the server.
+     * Keeps track of all unique sent player flags
+     */
+    std::set<int> m_PlayerUniqueFlags;
+
+    /**
+     * @brief Returns a non-mutable vector created from the set of all unique flags.
+     */
+    const std::vector<int> GetUniqueFlags() const;
+
+
+    /**
+     * @brief could be interesting if a client sends multiple client versions.
+     */
+    std::set<int> m_ClientVersions;
+
+    /**
+     * @brief returns a non-mutable empty vector if the client is a vanilla client.
+     * Returns one client version if the client is some kind of ddnet based client.
+     * Returns multiple versions if the client sends multiple client versions.
+     */
+    const std::vector<int> GetUniqueClientVersions() const;
+
+    /**
+     * @brief Add a sent client version to the players set of unique
+     * client versions.
+     */
+    void AddClientVersion(int version){m_ClientVersions.insert(version);};
+
+    /**
+     * Key = MessageID
+     * Value = How many of these messages were received?
+     */
+    std::map<int, int> m_WeirdClientMessages;
+
+    /**
+     * @brief      Adds a weird message tat was received by the server.
+     *			   Increases data(counter, how many were received) that's within the map.
+     * @param[in]  MessageID  The message id
+     */
+    void AddWeirdMessage(int MessageID);
+
+    /**
+     * @brief      Gets the unique weird messages occurrences.
+     *
+     * @return     Returns the a sorted(by key values) vector of unknown messageIDs and
+     * 				how often those were sent by that particular player.
+     */
+    const std::vector<std::pair<int, int>> GetUniqueWeirdMessageOccurrences() const;
+
+    bool m_IsMousePositionVisible;
+
+    void EnableCursorVisibility(){m_IsMousePositionVisible = true;}
+    void DisableCursorVisibility(){m_IsMousePositionVisible = false;}
+    bool IsCursorVisible() { return m_IsMousePositionVisible;}
 
 	// used for snapping to just update latency if the scoreboard is active
 	int m_aActLatency[MAX_CLIENTS];

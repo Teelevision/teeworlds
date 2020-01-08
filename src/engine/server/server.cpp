@@ -25,6 +25,7 @@
 #include <engine/shared/packer.h>
 #include <engine/shared/protocol.h>
 #include <engine/shared/snapshot.h>
+#include <engine/shared/fifo.h>
 
 #include <mastersrv/mastersrv.h>
 
@@ -364,6 +365,8 @@ CServer::CServer() : m_DemoRecorder(&m_SnapshotDelta)
 	m_InfoTexts = NULL;
 	m_InfoTextInterval = -1;
 	
+	m_aErrorShutdownReason[0] = 0;
+
 	Init();
 }
 
@@ -542,6 +545,30 @@ int CServer::Init()
 void CServer::SetRconCID(int ClientID)
 {
 	m_RconClientID = ClientID;
+}
+
+int CServer::GetAuthedState(int ClientID)
+{
+	return m_aClients[ClientID].m_Authed;
+}
+
+const char *CServer::GetAuthName(int ClientID)
+{
+	int level =  m_aClients[ClientID].m_Authed;
+
+	switch (level)
+	{
+	case AUTHED_ADMIN:
+		return "AUTHED_ADMIN";
+	case AUTHED_SUBADMIN:
+		return m_aClients[ClientID].m_SubAdminAuthName.c_str();
+	case AUTHED_MOD:
+		return "AUTHED_MOD";
+	case AUTHED_NO:
+		return "AUTHED_NO";
+	default:
+		return "default";
+	}
 }
 
 bool CServer::IsAuthed(int ClientID)
@@ -793,6 +820,22 @@ void CServer::DoSnapshot()
 	GameServer()->OnPostSnap();
 }
 
+int CServer::NewClientNoAuthCallback(int ClientID, void *pUser)
+{
+	CServer *pThis = (CServer *)pUser;
+	pThis->m_aClients[ClientID].m_State = CClient::STATE_CONNECTING;
+	pThis->m_aClients[ClientID].m_aName[0] = 0;
+	pThis->m_aClients[ClientID].m_aClan[0] = 0;
+	pThis->m_aClients[ClientID].m_Country = -1;
+	pThis->m_aClients[ClientID].m_Authed = AUTHED_NO;
+	pThis->m_aClients[ClientID].m_AuthTries = 0;
+	pThis->m_aClients[ClientID].m_pRconCmdToSend = 0;
+	pThis->m_aClients[ClientID].Reset();
+
+	pThis->SendMap(ClientID);
+
+	return 0;
+}
 
 int CServer::NewClientCallback(int ClientID, void *pUser)
 {
@@ -818,6 +861,9 @@ int CServer::DelClientCallback(int ClientID, const char *pReason, void *pUser)
 	str_format(aBuf, sizeof(aBuf), "client dropped. cid=%d addr=%s reason='%s'", ClientID, aAddrStr,	pReason);
 	pThis->Console()->Print(IConsole::OUTPUT_LEVEL_ADDINFO, "server", aBuf);
 
+	// TeeHistorian
+	pThis->GameServer()->OnClientEngineDrop(ClientID, pReason);
+
 	// notify the mod about the drop
 	if(pThis->m_aClients[ClientID].m_State >= CClient::STATE_READY)
 		pThis->GameServer()->OnClientDrop(ClientID, pReason);
@@ -837,13 +883,20 @@ int CServer::DelClientCallback(int ClientID, const char *pReason, void *pUser)
 	return 0;
 }
 
+void CServer::GetMapInfo(char *pMapName, int MapNameSize, int *pMapSize, int *pMapCrc)
+{
+	str_copy(pMapName, GetMapName(), MapNameSize);
+	*pMapSize = m_CurrentMapSize;
+	*pMapCrc = m_CurrentMapCrc;
+}
+
 void CServer::SendMap(int ClientID)
 {
-	CMsgPacker Msg(NETMSG_MAP_CHANGE);
-	Msg.AddString(GetMapName(), 0);
-	Msg.AddInt(m_CurrentMapCrc);
-	Msg.AddInt(m_CurrentMapSize);
-	SendMsgEx(&Msg, MSGFLAG_VITAL|MSGFLAG_FLUSH, ClientID, true);
+		CMsgPacker Msg(NETMSG_MAP_CHANGE);
+		Msg.AddString(GetMapName(), 0);
+		Msg.AddInt(m_CurrentMapCrc);
+		Msg.AddInt(m_CurrentMapSize);
+		SendMsgEx(&Msg, MSGFLAG_VITAL|MSGFLAG_FLUSH, ClientID, true);
 }
 
 void CServer::SendConnectionReady(int ClientID)
@@ -967,9 +1020,9 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 
 			if(Offset+ChunkSize >= m_CurrentMapSize)
 			{
-				ChunkSize = m_CurrentMapSize-Offset;
-				if(ChunkSize < 0)
-					ChunkSize = 0;
+				ChunkSize = m_CurrentMapSize - Offset;
+				//if (ChunkSize < 0)
+				//	ChunkSize = 0;
 				Last = 1;
 			}
 
@@ -996,7 +1049,7 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 				net_addr_str(m_NetServer.ClientAddr(ClientID), aAddrStr, sizeof(aAddrStr), true);
 
 				char aBuf[256];
-				str_format(aBuf, sizeof(aBuf), "player is ready. ClientID=%x addr=%s", ClientID, aAddrStr);
+				str_format(aBuf, sizeof(aBuf), "player is ready. ClientID=%d addr=%s secure=%s", ClientID, aAddrStr, m_NetServer.HasSecurityToken(ClientID)?"yes":"no");
 				Console()->Print(IConsole::OUTPUT_LEVEL_ADDINFO, "server", aBuf);
 				m_aClients[ClientID].m_State = CClient::STATE_READY;
 				GameServer()->OnClientConnected(ClientID);
@@ -1015,7 +1068,10 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 				Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", aBuf);
 				m_aClients[ClientID].m_State = CClient::STATE_INGAME;
 				GameServer()->OnClientEnter(ClientID);
-			}
+
+				// TeeHistorian
+				GameServer()->OnClientEngineJoin(ClientID);
+            }
 		}
 		else if(Msg == NETMSG_INPUT)
 		{
@@ -1093,7 +1149,7 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 					m_RconClientID = ClientID;
 					m_RconAuthLevel = m_aClients[ClientID].m_Authed;
 					Console()->SetAccessLevel(m_aClients[ClientID].m_Authed == AUTHED_ADMIN ? IConsole::ACCESS_LEVEL_ADMIN : (m_aClients[ClientID].m_Authed == AUTHED_SUBADMIN ? IConsole::ACCESS_LEVEL_SUBADMIN : IConsole::ACCESS_LEVEL_MOD));
-					Console()->ExecuteLineFlag(pCmd, CFGFLAG_SERVER);
+					Console()->ExecuteLineFlag(pCmd, CFGFLAG_SERVER, ClientID);
 					Console()->SetAccessLevel(IConsole::ACCESS_LEVEL_ADMIN);
 					m_RconClientID = IServer::RCON_CID_SERV;
 					m_RconAuthLevel = AUTHED_SUBADMIN;
@@ -1111,7 +1167,12 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 						SendRconLine(ClientID, "Wrong password.");
 					}
 				}
+			} 
+			else
+			{
+				
 			}
+
 		}
 		else if(Msg == NETMSG_RCON_AUTH)
 		{
@@ -1227,10 +1288,10 @@ void CServer::ProcessClientPacket(CNetChunk *pPacket)
 
 				for(int b = 0; b < pPacket->m_DataSize && b < 32; b++)
 				{
-					aBuf[b*3] = aHex[((const unsigned char *)pPacket->m_pData)[b]>>4];
-					aBuf[b*3+1] = aHex[((const unsigned char *)pPacket->m_pData)[b]&0xf];
-					aBuf[b*3+2] = ' ';
-					aBuf[b*3+3] = 0;
+					aBuf[b * 3] = aHex[((const unsigned char *)pPacket->m_pData)[b] >> 4];
+					aBuf[b * 3 + 1] = aHex[((const unsigned char *)pPacket->m_pData)[b] & 0xf];
+					aBuf[b * 3 + 2] = ' ';
+					aBuf[b * 3 + 3] = 0;
 				}
 
 				char aBufMsg[256];
@@ -1350,6 +1411,9 @@ void CServer::PumpNetwork()
 
 	m_ServerBan.Update();
 	m_Econ.Update();
+#if defined(CONF_FAMILY_UNIX)
+	m_Fifo.Update();
+#endif
 }
 
 char *CServer::GetMapName()
@@ -1402,8 +1466,8 @@ int CServer::LoadMap(const char *pMapName)
 	// load complete map into memory for download
 	{
 		IOHANDLE File = Storage()->OpenFile(aBuf, IOFLAG_READ, IStorage::TYPE_ALL);
-		m_CurrentMapSize = (int)io_length(File);
-		if(m_pCurrentMapData)
+		m_CurrentMapSize = (unsigned int)io_length(File);
+		if (m_pCurrentMapData)
 			mem_free(m_pCurrentMapData);
 		m_pCurrentMapData = (unsigned char *)mem_alloc(m_CurrentMapSize, 1);
 		io_read(File, m_pCurrentMapData, m_CurrentMapSize);
@@ -1450,15 +1514,23 @@ int CServer::Run()
 		return -1;
 	}
 
-	m_NetServer.SetCallbacks(NewClientCallback, DelClientCallback, this);
+	m_NetServer.SetCallbacks(NewClientCallback, NewClientNoAuthCallback, DelClientCallback, this);
 
 	m_Econ.Init(Console(), &m_ServerBan);
+
+#if defined(CONF_FAMILY_UNIX)
+	m_Fifo.Init(Console(), g_Config.m_SvInputFifo, CFGFLAG_SERVER);
+#endif
 
 	char aBuf[256];
 	str_format(aBuf, sizeof(aBuf), "server name is '%s'", g_Config.m_SvName);
 	Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", aBuf);
 
 	GameServer()->OnInit();
+	if(ErrorShutdown())
+	{
+		return 1;
+	}
 	str_format(aBuf, sizeof(aBuf), "version %s", GameServer()->NetVersion());
 	Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "server", aBuf);
 
@@ -1510,6 +1582,10 @@ int CServer::Run()
 					m_CurrentGameTick = 0;
 					Kernel()->ReregisterInterface(GameServer());
 					GameServer()->OnInit();
+					if(ErrorShutdown())
+					{
+						break;
+					}
 					UpdateServerInfo();
 				}
 				else
@@ -1542,6 +1618,10 @@ int CServer::Run()
 				}
 
 				GameServer()->OnTick();
+				if(ErrorShutdown())
+				{
+					break;
+				}
 			}
 
 			// snap game
@@ -1587,14 +1667,23 @@ int CServer::Run()
 			net_socket_read_wait(m_NetServer.Socket(), 5);
 		}
 	}
+
+	const char *pDisconnectReason = "Server shutdown";
+	if(ErrorShutdown())
+	{
+		pDisconnectReason = m_aErrorShutdownReason;
+	}
 	// disconnect all clients on shutdown
 	for(int i = 0; i < MAX_CLIENTS; ++i)
 	{
 		if(m_aClients[i].m_State != CClient::STATE_EMPTY)
-			m_NetServer.Drop(i, "Server shutdown");
+			m_NetServer.Drop(i, pDisconnectReason);
 
 		m_Econ.Shutdown();
 	}
+#if defined(CONF_FAMILY_UNIX)
+	m_Fifo.Shutdown();
+#endif
 
 	GameServer()->OnShutdown();
 	m_pMap->Unload();
@@ -2016,11 +2105,21 @@ void CServer::ConStatus(IConsole::IResult *pResult, void *pUser)
 										pThis->m_aClients[i].m_Authed == CServer::AUTHED_SUBADMIN ? bBuf :
 										pThis->m_aClients[i].m_Authed == CServer::AUTHED_MOD ? "(Mod)" : "";
 				const char *pAimBotStr = pThis->GameServer()->IsClientAimBot(i) ? "[aimbot]" : "";
-				str_format(aBuf, sizeof(aBuf), "id=%d addr=%s name='%s' score=%d %s %s", i, aAddrStr,
-					pThis->m_aClients[i].m_aName, pThis->m_aClients[i].m_Score, pAuthStr, pAimBotStr);
+
+				const char *securelyConnected = pThis->m_NetServer.HasSecurityToken(i) ? "Yes" : "No";
+
+				str_format(aBuf, sizeof(aBuf), "id:%2d  addr:%21s secure:%-3s  score:%03d name: '%s' clan: '%s' %s %s", 
+					i, 
+					aAddrStr,
+					securelyConnected,
+					pThis->m_aClients[i].m_Score, 
+					pThis->m_aClients[i].m_aName, 
+					pThis->m_aClients[i].m_aClan, 
+					pAuthStr, 
+					pAimBotStr);
 			}
 			else
-				str_format(aBuf, sizeof(aBuf), "id=%d addr=%s connecting", i, aAddrStr);
+				str_format(aBuf, sizeof(aBuf), "id=%2d addr=%21s connecting", i, aAddrStr);
 			pThis->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "Server", aBuf);
 		}
 	}
@@ -2106,6 +2205,7 @@ void CServer::rconLogClientOut(int ClientID, const char *msg)
 		m_aClients[ClientID].m_Authed = AUTHED_NO;
 		m_aClients[ClientID].m_AuthTries = 0;
 		m_aClients[ClientID].m_pRconCmdToSend = 0;
+
 		SendRconLine(ClientID, msg);
 		char aBuf[32];
 		str_format(aBuf, sizeof(aBuf), "ClientID=%d logged out", ClientID);
@@ -2249,6 +2349,12 @@ int main(int argc, const char **argv) // ignore_convention
 	}
 #endif
 
+	if (secure_random_init() != 0)
+	{
+		dbg_msg("secure", "could not initialize secure RNG");
+		return -1;
+	}
+
 	CServer *pServer = CreateServer();
 	IKernel *pKernel = IKernel::Create();
 
@@ -2325,3 +2431,7 @@ int main(int argc, const char **argv) // ignore_convention
 	return 0;
 }
 
+void CServer::SetErrorShutdown(const char *pReason)
+{
+	str_copy(m_aErrorShutdownReason, pReason, sizeof(m_aErrorShutdownReason));
+}
